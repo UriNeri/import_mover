@@ -10,6 +10,7 @@ import sys
 from collections import defaultdict
 # import libcst.metadata as meta
 # from libcst.metadata import ScopeProvider
+import re
 
 # install(show_locals=True)
 
@@ -152,8 +153,14 @@ def process_file(
     output_path: str,
     keep_old_imports: bool = True,
     remove_unused_imports: bool = True,
+    whitelist_libs: Optional[Set[str]] = None,
 ) -> None:
     """Process a Python file to move imports into functions where they are used."""
+    # Skip __init__.py files by default
+    if source_path.name == "__init__.py":
+        logging.info(f"Skipping __init__.py file: {source_path}")
+        return
+
     # Read and parse the source code
     source_code = source_path.read_text()
     wrapper = cst.metadata.MetadataWrapper(cst.parse_module(source_code))
@@ -173,6 +180,17 @@ def process_file(
     # Track line numbers of global imports and imports used in class/decorator definitions
     global_import_lines = []
     keep_global_imports = set()
+    
+    # Keep whitelisted library imports at global scope
+    if whitelist_libs:
+        for scope in scopes:
+            if isinstance(scope, cst.metadata.GlobalScope):
+                for assignment in scope.assignments:
+                    if isinstance(assignment.node, (cst.Import, cst.ImportFrom)):
+                        import_str = wrapper.module.code_for_node(assignment.node)
+                        if any(lib in import_str for lib in whitelist_libs):
+                            keep_global_imports.add(assignment.node)
+                            logging.debug(f"Keeping whitelisted import: {import_str}")
     
     # First pass: identify imports used in class definitions and decorators
     for scope in scopes:
@@ -204,6 +222,10 @@ def process_file(
         elif isinstance(scope, cst.metadata.FunctionScope):
             # Get the function node
             func_def = scope.node
+            # Skip lambda functions as they don't have decorators
+            if isinstance(func_def, cst.Lambda):
+                continue
+            
             # Check function decorators
             for decorator in func_def.decorators:
                 if isinstance(decorator.decorator, cst.Name):
@@ -350,16 +372,21 @@ def main():
                       help='Keep old imports as comments (default: True)')
     parser.add_argument('--remove-unused-imports', action='store_true', default=True,
                       help='Remove unused imports instead of commenting them (default: True)')
+    parser.add_argument('--whitelist', type=str,
+                      help='Comma-separated list of libraries to keep at global scope')
+    parser.add_argument('--ignore-files', type=str,
+                      help='Regular expression pattern for files to ignore')
 
     args = parser.parse_args()
+    
+    # Process whitelist
+    whitelist_libs = set(lib.strip() for lib in args.whitelist.split(',')) if args.whitelist else None
     
     # If the --output flag is not set, create default output path
     if args.output is None:
         args.output = str(Path(args.file).with_suffix('')) + '_im.py'
 
-    # Configure rich logging
-
-    # Replace rich logging with regular logging
+    # Configure logging
     logging.basicConfig(
         level=getattr(logging, args.log_level),
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -371,12 +398,18 @@ def main():
         if not source_path.exists():
             raise FileNotFoundError(f"File not found: {args.file}")
             
+        # Check if file should be ignored
+        if args.ignore_files and re.match(args.ignore_files, str(source_path)):
+            logging.info(f"Skipping ignored file: {source_path}")
+            return
+            
         process_file(
             source_path,
             args.log,
             args.output,
             keep_old_imports=args.keep_old_imports,
             remove_unused_imports=args.remove_unused_imports,
+            whitelist_libs=whitelist_libs,
         )
         logging.info(f"Successfully processed {args.file} --> output file: {args.output}")
         

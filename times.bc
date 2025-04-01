@@ -1,0 +1,4 @@
+ #### vanilla - cold run ####
+Benchmark 1: python cli.py
+ #### vanilla - warm run ####
+Benchmark 1: python cli.py
