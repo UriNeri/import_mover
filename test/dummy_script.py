@@ -5,22 +5,32 @@ import math as m
 import random
 import time
 from logging import basicConfig
-from dataclasses import dataclass
+from dataclasses import *
+from functools import wraps
 
+def timing_decorator(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start = time.time()
+        result = func(*args, **kwargs)
+        end = time.time()
+        print(f"{func.__name__} took {end - start} seconds")
+        return result
+    return wrapper
 
 @dataclass
 class ConfigSubclass(basicConfig):
-    
     def __init__(self, name):
         self.name = name
         self.pi = m.pi
         self.config = basicConfig()
 
-def function1(self):
+@timing_decorator
+def function1():
     """
     This function prints the value of pi from the math module.
-"""
-    print(m.pi) 
+    """
+    print(m.pi)
 
 def function2():
     """
@@ -28,12 +38,13 @@ def function2():
     """
     print(random.randint(1, 10))
 
-    def function3():
+    def some_nested_function3():
         """
         This function prints the current time.
         """
+        import time
         print(time.time())
-    function3()
+    some_nested_function3()
 
 def main():
     function1()

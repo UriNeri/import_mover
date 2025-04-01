@@ -6,15 +6,12 @@ from pathlib import Path
 from typing import Dict, List, Set, Optional, Union
 from dataclasses import dataclass, field
 import sys
-from rich.logging import RichHandler
-from rich.console import Console
-from rich.traceback import install
+# from rich.traceback import install
 from collections import defaultdict
-import libcst.metadata as meta
-from libcst.metadata import ScopeProvider
+# import libcst.metadata as meta
+# from libcst.metadata import ScopeProvider
 
-install(show_locals=True)
-console = Console()
+# install(show_locals=True)
 
 @dataclass
 class ImportInfo:
@@ -30,6 +27,7 @@ class MoveImportsTransformer(cst.CSTTransformer):
         self.imports_by_function = imports_by_function
         self.function_stack: List[str] = []
         self.module = module
+        self.processed_imports: Dict[str, Set[str]] = defaultdict(set)
         super().__init__()
 
     def visit_FunctionDef(self, node: cst.FunctionDef) -> bool:
@@ -60,6 +58,12 @@ class MoveImportsTransformer(cst.CSTTransformer):
                 
             # Add imports at the beginning (after docstring if exists)
             for imp in imports:
+                # Skip if we've already added this import to this function
+                import_str = self.module.code_for_node(imp)
+                if import_str in self.processed_imports[current_function]:
+                    logging.debug(f"  Skipping duplicate import: {import_str}")
+                    continue
+                
                 # Create a new import node based on the original
                 if isinstance(imp, cst.Import):
                     new_imp = cst.Import(names=imp.names)
@@ -74,6 +78,7 @@ class MoveImportsTransformer(cst.CSTTransformer):
                     )
                     logging.debug(f"  Adding import from: {self.module.code_for_node(new_imp)}")
                 new_body.append(cst.SimpleStatementLine([new_imp]))
+                self.processed_imports[current_function].add(import_str)
             
             # Add rest of function body
             new_body.extend(updated_node.body.body[start_idx:])
@@ -165,11 +170,11 @@ def process_file(
     unused_imports: Dict[Union[cst.Import, cst.ImportFrom], Set[str]] = defaultdict(set)
     imports_by_function: Dict[str, List[cst.CSTNode]] = defaultdict(list)
     
-    # Track line numbers of global imports and imports used in class definitions
+    # Track line numbers of global imports and imports used in class/decorator definitions
     global_import_lines = []
-    class_imports = set()
+    keep_global_imports = set()
     
-    # First pass: identify imports used in class definitions
+    # First pass: identify imports used in class definitions and decorators
     for scope in scopes:
         if isinstance(scope, cst.metadata.ClassScope):
             # Get the class node
@@ -182,8 +187,33 @@ def process_file(
                         if (isinstance(assignment, cst.metadata.Assignment) and 
                             assignment.name == base.value.value and
                             isinstance(assignment.node, (cst.Import, cst.ImportFrom))):
-                            class_imports.add(assignment.node)
+                            keep_global_imports.add(assignment.node)
                             logging.debug(f"Found import used in class definition: {wrapper.module.code_for_node(assignment.node)}")
+            
+            # Check class decorators
+            for decorator in class_def.decorators:
+                if isinstance(decorator.decorator, cst.Name):
+                    # Find the import that defines this decorator
+                    for assignment in scope.parent.assignments:
+                        if (isinstance(assignment, cst.metadata.Assignment) and 
+                            assignment.name == decorator.decorator.value and
+                            isinstance(assignment.node, (cst.Import, cst.ImportFrom))):
+                            keep_global_imports.add(assignment.node)
+                            logging.debug(f"Found import used in class decorator: {wrapper.module.code_for_node(assignment.node)}")
+        
+        elif isinstance(scope, cst.metadata.FunctionScope):
+            # Get the function node
+            func_def = scope.node
+            # Check function decorators
+            for decorator in func_def.decorators:
+                if isinstance(decorator.decorator, cst.Name):
+                    # Find the import that defines this decorator
+                    for assignment in scope.parent.assignments:
+                        if (isinstance(assignment, cst.metadata.Assignment) and 
+                            assignment.name == decorator.decorator.value and
+                            isinstance(assignment.node, (cst.Import, cst.ImportFrom))):
+                            keep_global_imports.add(assignment.node)
+                            logging.debug(f"Found import used in function decorator: {wrapper.module.code_for_node(assignment.node)}")
     
     # Analyze scopes to find unused imports and function usage
     for scope in scopes:
@@ -206,9 +236,9 @@ def process_file(
                         global_import_lines.append(pos.start.line)
                         logging.debug(f"    Added to global imports")
                         
-                    # Skip moving imports used in class definitions
-                    if node in class_imports:
-                        logging.debug(f"    Keeping as global (used in class definition)")
+                    # Skip moving imports used in class definitions or decorators
+                    if node in keep_global_imports:
+                        logging.debug(f"    Keeping as global (used in class/decorator)")
                         continue
                         
                     if len(assignment.references) == 0:
@@ -264,17 +294,17 @@ def process_file(
         with temp_output.open('r') as f:
             lines = f.readlines()
         
-        # Comment out global imports except those used in class definitions
+        # Comment out global imports except those used in class definitions or decorators
         modified_lines = []
         for i, line in enumerate(lines, start=1):
-            line_contains_class_import = any(
+            line_contains_kept_import = any(
                 wrapper.module.code_for_node(imp) in line 
-                for imp in class_imports
+                for imp in keep_global_imports
             )
             
             if (i in global_import_lines and line.strip() and 
                 not line.strip().startswith('#') and 
-                not line_contains_class_import):
+                not line_contains_kept_import):
                 modified_lines.append(f"# {line}")
                 logging.debug(f"Commented out line {i}: {line.strip()}")
             else:
@@ -328,11 +358,12 @@ def main():
         args.output = str(Path(args.file).with_suffix('')) + '_im.py'
 
     # Configure rich logging
+
+    # Replace rich logging with regular logging
     logging.basicConfig(
         level=getattr(logging, args.log_level),
-        format="%(message)s",
-        datefmt="[%X]",
-        handlers=[RichHandler(rich_tracebacks=True)]
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
     )
     
     try:
